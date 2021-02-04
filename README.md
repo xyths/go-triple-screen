@@ -1,2 +1,2 @@
-# go-triple-screen
-triple screen trading system
+# 三重滤网交易系统(Triple Screen Trading System)
+
