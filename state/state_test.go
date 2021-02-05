@@ -4,9 +4,9 @@ import "testing"
 
 func TestState_Format(t *testing.T) {
 	states := []State{
-		{LongTermRule: 1},
-		{LongTermRule: -1},
-		{LongTermRule: 0},
+		{tide: 1},
+		{tide: -1},
+		{tide: 0},
 	}
 	t.Run("file format", func(t *testing.T) {
 		for _, s := range states {

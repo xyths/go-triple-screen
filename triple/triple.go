@@ -5,7 +5,10 @@ import (
 	"errors"
 	"fmt"
 	indicator "github.com/xyths/go-indicators"
+	"github.com/xyths/go-triple-screen/exchange"
+	"github.com/xyths/go-triple-screen/executor"
 	"github.com/xyths/go-triple-screen/impulse"
+	"github.com/xyths/go-triple-screen/signal"
 	"github.com/xyths/go-triple-screen/state"
 	"github.com/xyths/hs"
 	"github.com/xyths/hs/broadcast"
@@ -37,21 +40,23 @@ type Trader struct {
 
 	longTermConfig impulse.Config
 
-	Sugar  *zap.SugaredLogger
-	db     *mongo.Database
-	robots []broadcast.Broadcaster
-	ex     Exchange
-	symbol string
+	Sugar    *zap.SugaredLogger
+	db       *mongo.Database
+	robots   []broadcast.Broadcaster
+	ex       exchange.Exchange
+	executor *executor.Executor
+	symbol   string
 
 	intervalLong   time.Duration
 	intervalMiddle time.Duration
 	intervalShort  time.Duration
 
-	state state.State
+	state   state.State
+	command chan int
 }
 
 func NewTrader(config Config) (*Trader, error) {
-	return &Trader{config: config}, nil
+	return &Trader{config: config, command: make(chan int, 10)}, nil
 }
 
 func (t *Trader) Init(ctx context.Context) error {
@@ -77,6 +82,8 @@ func (t *Trader) Init(ctx context.Context) error {
 		return err
 	}
 	t.Sugar.Info("exchange initialized")
+	t.executor = executor.NewExecutor(t.command, t.ex, t.Sugar)
+	t.Sugar.Info("executor initialized")
 	t.initRobots(ctx)
 	t.Sugar.Info("robots initialized")
 
@@ -97,6 +104,7 @@ func (t *Trader) Init(ctx context.Context) error {
 
 // Start serve until ctx.Done
 func (t *Trader) Start(ctx context.Context) error {
+	t.executor.Start(ctx)
 	t.Sugar.Info("trader started")
 	//t.loadState(ctx)
 	//t.checkState(ctx)
@@ -131,6 +139,7 @@ func (t *Trader) Start(ctx context.Context) error {
 
 // stop the running service if it's not
 func (t *Trader) Stop(ctx context.Context) error {
+	t.executor.Stop(ctx)
 	t.Sugar.Info("trader stopped")
 	return nil
 }
@@ -175,16 +184,22 @@ func (t *Trader) initRobots(ctx context.Context) {
 // 3. buy or sell (market price)
 func (t *Trader) doWork(ctx context.Context, checkLong bool) {
 	if checkLong {
-		t.updateTide(ctx)
+		// TODO: need retry
+		if err := t.updateTide(ctx); err != nil {
+			t.Sugar.Errorf("update tide error: %s", err)
+		}
 	}
-	t.updateWave(ctx)
+	// TODO: need retry
+	if err := t.updateWave(ctx); err != nil {
+		t.Sugar.Errorf("update wave error: %s", err)
+	}
 }
 
-func (t *Trader) updateTide(ctx context.Context) {
+func (t *Trader) updateTide(ctx context.Context) error {
 	candle, err := t.ex.CandleBySize(ctx, t.symbol, t.intervalLong, 200)
 	if err != nil {
-		t.Sugar.Errorf("update tide error: %s", err)
-		return
+		//t.Sugar.Errorf("update tide error: %s", err)
+		return err
 	}
 	//t.Sugar.Debugf("candle len = %d", candle.Length())
 	//for i := candle.Length() - 4; i < candle.Length(); i++ {
@@ -195,23 +210,51 @@ func (t *Trader) updateTide(ctx context.Context) {
 	rules := impulse.Impulse(t.longTermConfig, candle.Close)
 	l := len(rules)
 	if l < 3 {
-		return
+		return errors.New("no enough candle data")
 	}
+	oldState := t.state.Tide()
 	newState := rules[l-2]
+	if oldState == newState {
+		// no change
+		return nil
+	}
 	//for i := 0; i < l; i++ {
 	//	t.Sugar.Debugf("[%d] timestamp %d rule %d", i, candle.Timestamp[i], rules[i])
 	//}
 	t.Sugar.Infof("new long-term state is %d", newState)
-	if err := t.state.UpdateLongState(ctx, newState); err != nil {
+	if err := t.state.UpdateTide(ctx, newState); err != nil {
 		t.Sugar.Errorf("update state error: %s", err)
-		return
+		return err
 	}
+	switch newState {
+	case state.TrendUp:
+		if oldState == state.TrendDown {
+			t.command <- signal.Cover
+			//t.command <- signal.Long
+		} else if oldState == state.TrendNeutral {
+			//t.command <- signal.Long
+		}
+	case state.TrendDown:
+		if oldState == state.TrendUp {
+			t.command <- signal.Sell
+			//t.command <- signal.Short
+		} else if oldState == state.TrendNeutral {
+			//t.command <- signal.Short
+		}
+	case state.TrendNeutral:
+		if oldState == state.TrendUp {
+			//t.command <- signal.Sell
+		} else if oldState == state.TrendDown {
+			t.command <- signal.Cover
+		}
+	}
+	return nil
 }
 
-func (t *Trader) updateWave(ctx context.Context) {
+func (t *Trader) updateWave(ctx context.Context) error {
 	candle, err := t.ex.CandleBySize(ctx, t.symbol, t.intervalMiddle, 2000)
 	if err != nil {
-		return
+		return err
 	}
 	efi := indicator.Efi(2, candle.Close, candle.Volume)
 	t.Sugar.Debugf("intermediate candle len = %d", candle.Length())
@@ -221,16 +264,29 @@ func (t *Trader) updateWave(ctx context.Context) {
 	}
 	l := len(efi)
 	if l < 2 {
-		return
+		return errors.New("no enough candle data")
 	}
-	signal := efi[l-2]
-	if signal < 0 && (t.state.LongTermRule == state.RuleLong || t.state.LongTermRule == state.RuleNeutral) {
-		if err := t.state.UpdateSignal(ctx, state.SignalLong); err != nil {
-			t.Sugar.Errorf("update signal (%d) error: %s", state.SignalLong, err)
-		}
-	} else if signal > 0 && (t.state.LongTermRule == state.RuleShort || t.state.LongTermRule == state.RuleNeutral) {
-		if err := t.state.UpdateSignal(ctx, state.SignalShort); err != nil {
-			t.Sugar.Errorf("update signal (%d) error: %s", state.SignalShort, err)
+	value := efi[l-2]
+	newWave := state.TrendNeutral
+	if value > 0 {
+		newWave = state.TrendUp
+	} else if value < 0 {
+		newWave = state.TrendDown
+	}
+	oldWave := t.state.Wave()
+	if newWave != oldWave {
+		if err := t.state.UpdateWave(ctx, newWave); err != nil {
+			t.Sugar.Errorf("update wave (%d) error: %s", newWave, err)
+			return err
 		}
 	}
+	tide := t.state.Tide()
+	if newWave == state.TrendDown && (tide == state.TrendUp || tide == state.TrendNeutral) {
+		t.command <- signal.Long
+		t.Sugar.Info("wave send long signal")
+	} else if newWave == state.TrendUp && (tide == state.TrendDown || tide == state.TrendNeutral) {
+		t.command <- signal.Short
+		t.Sugar.Info("wave send short signal")
+	}
+	return nil
 }

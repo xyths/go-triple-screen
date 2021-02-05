@@ -17,7 +17,7 @@ func init() {
 	app = &cli.App{
 		Name:    filepath.Base(os.Args[0]),
 		Usage:   "the triple screen trading system",
-		Version: "0.1.9",
+		Version: "0.1.10",
 		Action:  tripleAction,
 	}
 

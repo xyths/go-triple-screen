@@ -7,27 +7,31 @@ import (
 	"go.mongodb.org/mongo-driver/mongo"
 )
 
+const (
+	TrendUp      int = 1
+	TrendDown        = -1
+	TrendNeutral     = 0
+
+	SignalWait  = 0
+	SignalLong  = 1
+	SignalSell  = -1
+	SignalShort = -2
+	SignalCover = 2
+
+	keyTide   = "tide"
+	keyWave   = "wave"
+	keySignal = "signal"
+)
+
 type State struct {
 	db   *mongo.Database
 	coll *mongo.Collection
 
-	LongTermRule int // 1: long/green, -1: short/red, 0: blue/neutral
+	tide int // 1: up/green, -1: down/red, 0: neutral/blue
+	wave int // 1: up, -1: down, 0: neutral
 	// intermediate signal/command
 	Signal int // 1: long, -1: short, 0: no signal
 }
-
-const (
-	RuleLong    = 1
-	RuleShort   = -1
-	RuleNeutral = 0
-
-	SignalLong  = 1
-	SignalShort = -1
-	SignalWait  = 0
-
-	keyLongTermRule = "longTerm"
-	keySignal       = "signal"
-)
 
 func (s *State) Init(db *mongo.Database) {
 	s.db = db
@@ -35,14 +39,14 @@ func (s *State) Init(db *mongo.Database) {
 }
 
 func (s State) Format(color bool) string {
-	return s.formatLongTerm(color) + "\n" + s.formatMiddleTerm(color) + "\n" + s.formatShortTerm(color)
+	return s.formatTide(color) + "\n" + s.formatWave(color) + "\n" + s.formatRipple(color)
 }
 
 func (s *State) Load(ctx context.Context) error {
-	if err := hs.LoadKey(ctx, s.coll, keyLongTermRule, &s.LongTermRule); err != nil {
+	if err := hs.LoadKey(ctx, s.coll, keyTide, &s.tide); err != nil {
 		return err
 	}
-	if err := hs.LoadKey(ctx, s.coll, keySignal, &s.LongTermRule); err != nil {
+	if err := hs.LoadKey(ctx, s.coll, keySignal, &s.tide); err != nil {
 		return err
 	}
 	return nil
@@ -50,18 +54,29 @@ func (s *State) Load(ctx context.Context) error {
 
 func (s *State) Clear(ctx context.Context) error {
 	// long-term/intermediate/short-term status no-need to delete, will keep in there
-	//if err := hs.LoadKey(ctx, s.coll, "longTerm", &s.LongTermRule); err != nil {
-	//	return err
-	//}
+
 	if err := hs.DeleteKey(ctx, s.coll, keySignal); err != nil {
 		return err
 	}
 	return nil
 }
 
-func (s *State) UpdateLongState(ctx context.Context, newState int) error {
-	s.LongTermRule = newState
-	return hs.SaveKey(ctx, s.coll, keyLongTermRule, s.LongTermRule)
+func (s *State) Tide() int {
+	return s.tide
+}
+
+func (s *State) UpdateTide(ctx context.Context, newState int) error {
+	s.tide = newState
+	return hs.SaveKey(ctx, s.coll, keyTide, s.tide)
+}
+
+func (s *State) Wave() int {
+	return s.wave
+}
+
+func (s *State) UpdateWave(ctx context.Context, newWave int) error {
+	s.wave = newWave
+	return hs.SaveKey(ctx, s.coll, keyWave, s.wave)
 }
 
 func (s *State) UpdateSignal(ctx context.Context, newSignal int) error {
@@ -69,9 +84,9 @@ func (s *State) UpdateSignal(ctx context.Context, newSignal int) error {
 	return hs.SaveKey(ctx, s.coll, keySignal, s.Signal)
 }
 
-func (s State) formatLongTerm(color bool) string {
+func (s State) formatTide(color bool) string {
 	var status, yes, no string
-	switch s.LongTermRule {
+	switch s.tide {
 	case 1:
 		status = green(color, "Green")
 		yes = "long, stand aside"
@@ -89,7 +104,7 @@ func (s State) formatLongTerm(color bool) string {
 	return long
 }
 
-func (s State) formatMiddleTerm(color bool) string {
+func (s State) formatWave(color bool) string {
 	var signal string
 	switch s.Signal {
 	case SignalLong:
@@ -102,7 +117,7 @@ func (s State) formatMiddleTerm(color bool) string {
 	return fmt.Sprintf("SECOND SCREEN - MARKET WAVE\n\tSignal: %s", signal)
 }
 
-func (s State) formatShortTerm(color bool) string {
+func (s State) formatRipple(color bool) string {
 	return "THIRD SCREEN - MARKET RIPPLE"
 }
 
